@@ -11,7 +11,7 @@ class Claude_Client(BaseLLMModel):
         self.api_secret = api_secret
         if None in [self.api_secret]:
             raise Exception("请在配置文件或者环境变量中设置Claude的API Secret")
-        self.claude_client = Anthropic(api_key=self.api_secret)
+        self.claude_client = Anthropic(api_key=self.api_secret, base_url=self.api_host)
 
     def _get_claude_style_history(self):
         history = []
@@ -91,8 +91,6 @@ class Claude_Client(BaseLLMModel):
     def get_answer_at_once(self):
         system_prompt = self.system_prompt
         history = self._get_claude_style_history()
-        if system_prompt is not None:
-            history = [construct_system(system_prompt), *history]
 
         response = self.claude_client.messages.create(
             model=self.model_name,
@@ -101,6 +99,6 @@ class Claude_Client(BaseLLMModel):
             system=system_prompt,
         )
         if response is not None:
-            return response["content"][0]["text"], response["usage"]["output_tokens"]
+            return response.content[0].text, response.usage.output_tokens
         else:
             return i18n("获取资源错误"), 0

@@ -27,22 +27,19 @@ class OpenAIVisionClient(BaseLLMModel):
         self,
         model_name,
         api_key,
-        system_prompt=INITIAL_SYSTEM_PROMPT,
-        temperature=1.0,
-        top_p=1.0,
         user_name=""
     ) -> None:
         super().__init__(
             model_name=model_name,
-            temperature=temperature,
-            top_p=top_p,
-            system_prompt=system_prompt,
-            user=user_name
+            user=user_name,
+            config={
+                "api_key": api_key
+            }
         )
-        self.image_token = 0
-        self.api_key = api_key
-        self.need_api_key = True
-        self.max_generation_token = 4096
+        if self.api_host is not None:
+            self.chat_completion_url, self.images_completion_url, self.openai_api_base, self.balance_api_url, self.usage_api_url = shared.format_openai_host(self.api_host)
+        else:
+            self.api_host, self.chat_completion_url, self.images_completion_url, self.openai_api_base, self.balance_api_url, self.usage_api_url = shared.state.api_host, shared.state.chat_completion_url, shared.state.images_completion_url, shared.state.openai_api_base, shared.state.balance_api_url, shared.state.usage_api_url
         self._refresh_header()
 
     def get_answer_stream_iter(self):
@@ -133,7 +130,9 @@ class OpenAIVisionClient(BaseLLMModel):
                         content.append(
                             {
                                 "type": "image_url",
-                                "image_url": f"data:image/{self.get_image_type(image)};base64,{self.get_base64_image(image)}"
+                                "image_url": {
+                                    "url": f"data:image/{self.get_image_type(image)};base64,{self.get_base64_image(image)}",
+                                }
                             },
                         )
                 if content:
@@ -162,7 +161,7 @@ class OpenAIVisionClient(BaseLLMModel):
             "Authorization": f"Bearer {openai_api_key}",
         }
 
-        if system_prompt is not None:
+        if system_prompt is not None and "o1" not in self.model_name:
             history = [construct_system(system_prompt), *history]
 
         payload = {
@@ -172,12 +171,15 @@ class OpenAIVisionClient(BaseLLMModel):
             "top_p": self.top_p,
             "n": self.n_choices,
             "stream": stream,
-            "presence_penalty": self.presence_penalty,
-            "frequency_penalty": self.frequency_penalty,
-            "max_tokens": 4096
         }
 
-        if self.stop_sequence is not None:
+        if self.max_generation_token:
+            payload["max_tokens"] = self.max_generation_token
+        if self.presence_penalty:
+            payload["presence_penalty"] = self.presence_penalty
+        if self.frequency_penalty:
+            payload["frequency_penalty"] = self.frequency_penalty
+        if self.stop_sequence:
             payload["stop"] = self.stop_sequence
         if self.logit_bias is not None:
             payload["logit_bias"] = self.encoded_logit_bias()
@@ -189,14 +191,10 @@ class OpenAIVisionClient(BaseLLMModel):
         else:
             timeout = TIMEOUT_ALL
 
-        # 如果有自定义的api-host，使用自定义host发送请求，否则使用默认设置发送请求
-        if shared.state.chat_completion_url != CHAT_COMPLETION_URL:
-            logging.debug(f"使用自定义API URL: {shared.state.chat_completion_url}")
-
         with retrieve_proxy():
             try:
                 response = requests.post(
-                    shared.state.chat_completion_url,
+                    self.chat_completion_url,
                     headers=headers,
                     json=payload,
                     stream=stream,
@@ -277,16 +275,13 @@ class OpenAIVisionClient(BaseLLMModel):
             "temperature": f"{temperature}",
         }
         payload = {
-            "model": self.model_name,
+            "model": RENAME_MODEL if RENAME_MODEL is not None else self.model_name,
             "messages": history,
         }
-        # 如果有自定义的api-host，使用自定义host发送请求，否则使用默认设置发送请求
-        if shared.state.chat_completion_url != CHAT_COMPLETION_URL:
-            logging.debug(f"使用自定义API URL: {shared.state.chat_completion_url}")
 
         with retrieve_proxy():
             response = requests.post(
-                shared.state.chat_completion_url,
+                self.chat_completion_url,
                 headers=headers,
                 json=payload,
                 stream=False,
@@ -294,3 +289,29 @@ class OpenAIVisionClient(BaseLLMModel):
             )
 
         return response
+
+    def auto_name_chat_history(self, name_chat_method, user_question, single_turn_checkbox):
+        if len(self.history) == 2 and not single_turn_checkbox and not hide_history_when_not_logged_in:
+            user_question = self.history[0]["content"]
+            if name_chat_method == i18n("模型自动总结（消耗tokens）"):
+                ai_answer = self.history[1]["content"]
+                try:
+                    history = [
+                        { "role": "system", "content": SUMMARY_CHAT_SYSTEM_PROMPT},
+                        { "role": "user", "content": f"Please write a title based on the following conversation:\n---\nUser: {user_question}\nAssistant: {ai_answer}"}
+                    ]
+                    response = self._single_query_at_once(history, temperature=0.0)
+                    response = json.loads(response.text)
+                    content = response["choices"][0]["message"]["content"]
+                    filename = replace_special_symbols(content) + ".json"
+                except Exception as e:
+                    logging.info(f"自动命名失败。{e}")
+                    filename = replace_special_symbols(user_question)[:16] + ".json"
+                return self.rename_chat_history(filename)
+            elif name_chat_method == i18n("第一条提问"):
+                filename = replace_special_symbols(user_question)[:16] + ".json"
+                return self.rename_chat_history(filename)
+            else:
+                return gr.update()
+        else:
+            return gr.update()
